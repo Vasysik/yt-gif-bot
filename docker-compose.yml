@@ -1,0 +1,7 @@
+services:
+  yt-gif-bot:
+    build: .
+    container_name: yt-gif-bot-container
+    restart: unless-stopped
+    volumes:
+      - ./config.py:/app/config.py

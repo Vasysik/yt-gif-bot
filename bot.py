@@ -2,13 +2,13 @@ import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 import yt_dlp_host_api
 import config
-import re
 import os
 import tempfile
 import requests
 from io import BytesIO
 from locales import TRANSLATIONS
 import time
+from urllib.parse import urlparse
 
 bot = telebot.TeleBot(config.TELEGRAM_BOT_TOKEN)
 api = yt_dlp_host_api.api(config.YT_DLP_HOST_URL)
@@ -17,8 +17,12 @@ lang = TRANSLATIONS[config.BOT_LANGUAGE]
 user_states = {}
 
 def is_youtube_url(url):
-    youtube_regex = r'(https?://)?(www\.)?(youtube\.com|youtu\.be|youtube-nocookie\.com)/.+'
-    return re.match(youtube_regex, url) is not None
+    try:
+        parsed_url = urlparse(url)
+        return (parsed_url.scheme in ['http', 'https'] and
+                parsed_url.netloc in {"youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be", })
+    except Exception:
+        return False
 
 def time_to_seconds(time_str):
     try:
@@ -208,7 +212,7 @@ def handle_callback(call):
     elif call.data == "cancel":
         bot.answer_callback_query(call.id, lang["alert_cancelled"])
         del user_states[user_id]
-        bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id)
+        bot.delete_message(call.message.chat.id, call.message.message_id)
         
     elif call.data == "done":
         bot.answer_callback_query(call.id)
@@ -228,12 +232,10 @@ def handle_callback(call):
             )
             return
         
-        # <<<--- ВОТ ИЗМЕНЕНИЕ ---<<<
-        # Удаляем сообщение с превью и кнопками вместо редактирования
         try:
             bot.delete_message(call.message.chat.id, state['message_id'])
         except Exception:
-            pass # Если не получилось удалить, не страшно, продолжаем
+            pass
         
         process_msg = bot.send_message(
             call.message.chat.id,
