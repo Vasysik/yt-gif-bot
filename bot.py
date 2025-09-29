@@ -352,9 +352,9 @@ def handle_callback(call):
                 '-y', raw_gif_file.name
             ], check=True, capture_output=True, text=True)
             
-            logging.info(f"User {user_id}: Optimizing GIF with gifsicle...")
+            logging.info(f"User {user_id}: Optimizing GIF with gifsicle (lossy)...")
             subprocess.run([
-                'gifsicle', '-O3', raw_gif_file.name, '-o', final_gif_file.name
+                'gifsicle', '-O3', '--lossy=80', raw_gif_file.name, '-o', final_gif_file.name
             ], check=True, capture_output=True, text=True)
 
             with open(final_gif_file.name, 'rb') as f:
