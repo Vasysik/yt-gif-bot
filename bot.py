@@ -210,11 +210,12 @@ def handle_message(message):
     
     try:
         info = client.get_info(url=message.text)
-        video_data = info.get_json(['title', 'duration', 'thumbnail'])
+        video_data = info.get_json(['title', 'duration', 'thumbnail', 'width'])
         
         title = video_data.get('title', lang["video_title_default"])
         duration = video_data.get('duration', 0)
         thumbnail = video_data.get('thumbnail', '')
+        video_width = video_data.get('width', 0)
         duration_str = seconds_to_time(duration)
         
         start_time = "00:00:00"
@@ -237,7 +238,8 @@ def handle_message(message):
         user_states[user_id] = {
             'url': message.text, 'title': title, 'duration': duration_str,
             'start_time': start_time, 'end_time': end_time, 'message_id': msg.message_id,
-            'gif_settings': DEFAULT_SETTINGS.copy()
+            'gif_settings': DEFAULT_SETTINGS.copy(),
+            'video_width': video_width
         }
     except Exception as e:
         logging.error(f"Failed to get video info for URL {message.text} by user {user_id}. Error: {e}")
@@ -318,7 +320,7 @@ def handle_callback(call):
         
         process_msg = bot.send_message(call.message.chat.id, lang["creating_gif"].format(start_time=state['start_time'], end_time=state['end_time']))
         
-        mp4_file, gif_file = None, None
+        mp4_file, raw_gif_file, final_gif_file = None, None, None
         try:
             mp4_file = tempfile.NamedTemporaryFile(suffix='.mp4', delete=False)
             result = client.get_video(
@@ -328,33 +330,41 @@ def handle_callback(call):
             result.save_file(mp4_file.name)
             mp4_file.close()
 
-            gif_file = tempfile.NamedTemporaryFile(suffix='.gif', delete=False)
-            gif_file.close()
-            
+            raw_gif_file = tempfile.NamedTemporaryFile(suffix='.gif', delete=False)
+            raw_gif_file.close()
+            final_gif_file = tempfile.NamedTemporaryFile(suffix='.gif', delete=False)
+            final_gif_file.close()
+
             settings = state['gif_settings']
             gif_fps = settings['fps']
-            gif_width = settings['width']
+            gif_width = min(settings['width'], state.get('video_width', settings['width']))
             gif_colors = settings['colors']
             logging.info(f"User {user_id}: Using settings FPS:{gif_fps}, Width:{gif_width}, Colors:{gif_colors}")
             
             ffmpeg_filter = (
                 f'fps={gif_fps},scale={gif_width}:-1:flags=lanczos,'
-                f'split[s0][s1];[s0]palettegen=max_colors={gif_colors}[p];[s1][p]paletteuse'
+                f'split[s0][s1];[s0]palettegen=stats_mode=diff:max_colors={gif_colors}[p];'
+                f'[s1][p]paletteuse=dither=bayer:diff_mode=rectangle'
             )
             
             subprocess.run([
                 'ffmpeg', '-i', mp4_file.name, '-vf', ffmpeg_filter,
-                '-y', gif_file.name
+                '-y', raw_gif_file.name
             ], check=True, capture_output=True, text=True)
             
-            with open(gif_file.name, 'rb') as f:
+            logging.info(f"User {user_id}: Optimizing GIF with gifsicle...")
+            subprocess.run([
+                'gifsicle', '-O3', raw_gif_file.name, '-o', final_gif_file.name
+            ], check=True, capture_output=True, text=True)
+
+            with open(final_gif_file.name, 'rb') as f:
                 bot.send_animation(call.message.chat.id, f, caption=lang["gif_ready"].format(title=state['title']))
             
             bot.delete_message(call.message.chat.id, process_msg.message_id)
             del user_states[user_id]
             
         except subprocess.CalledProcessError as e:
-            logging.error(f"FFmpeg failed for user {user_id}. Error: {e.stderr}")
+            logging.error(f"Processing failed for user {user_id}. Error: {e.stderr}")
             bot.delete_message(call.message.chat.id, process_msg.message_id)
             bot.send_message(call.message.chat.id, lang["error_creating_gif"])
             if user_id in user_states: del user_states[user_id]
@@ -365,8 +375,9 @@ def handle_callback(call):
             if user_id in user_states: del user_states[user_id]
         finally:
             if mp4_file and os.path.exists(mp4_file.name): os.unlink(mp4_file.name)
-            if gif_file and os.path.exists(gif_file.name): os.unlink(gif_file.name)
-    
+            if raw_gif_file and os.path.exists(raw_gif_file.name): os.unlink(raw_gif_file.name)
+            if final_gif_file and os.path.exists(final_gif_file.name): os.unlink(final_gif_file.name)
+
     if not data.startswith(('start_', 'end_', 'duration_', 'set_')) and data != 'done':
         bot.answer_callback_query(call.id)
 
