@@ -10,6 +10,7 @@ from locales import TRANSLATIONS
 import time
 from urllib.parse import urlparse
 import logging
+import subprocess
 
 logging.basicConfig(
     level=logging.INFO,
@@ -20,11 +21,25 @@ logging.basicConfig(
     ]
 )
 
+
 bot = telebot.TeleBot(config.TELEGRAM_BOT_TOKEN)
 api = yt_dlp_host_api.api(config.YT_DLP_HOST_URL)
 client = api.get_client(config.YT_DLP_API_KEY)
 lang = TRANSLATIONS[config.BOT_LANGUAGE]
 user_states = {}
+
+FPS_OPTIONS = [10, 15, 20, 25]
+WIDTH_OPTIONS = [360, 480, 720, 1080]
+COLOR_OPTIONS = [64, 128, 256]
+
+DEFAULT_SETTINGS = {
+    'fps': 15,
+    'width': 480,
+    'colors': 128
+}
+
+def is_current(a, b):
+    return str(a) == str(b)
 
 def is_youtube_url(url):
     try:
@@ -64,19 +79,40 @@ def check_subscription(user_id):
         return False
 
 def create_time_keyboard(start_time, end_time):
-    keyboard = InlineKeyboardMarkup()
+    keyboard = InlineKeyboardMarkup(row_width=2)
     duration_seconds = time_to_seconds(end_time) - time_to_seconds(start_time)
     
     start_btn = InlineKeyboardButton(lang["button_start"].format(time=start_time), callback_data=f"start_{start_time}")
     end_btn = InlineKeyboardButton(lang["button_end"].format(time=end_time), callback_data=f"end_{end_time}")
     duration_btn = InlineKeyboardButton(lang["button_duration"].format(seconds=duration_seconds), callback_data=f"duration_{duration_seconds}")
+    settings_btn = InlineKeyboardButton(lang["button_settings"], callback_data="open_settings_main")
     done_btn = InlineKeyboardButton(lang["button_done"], callback_data="done")
     cancel_btn = InlineKeyboardButton(lang["button_cancel"], callback_data="cancel")
     
-    keyboard.row(start_btn)
-    keyboard.row(end_btn)
-    keyboard.row(duration_btn)
-    keyboard.row(done_btn, cancel_btn)
+    keyboard.add(start_btn, end_btn, duration_btn, settings_btn, done_btn, cancel_btn)
+    return keyboard
+
+def create_main_settings_keyboard(user_id):
+    settings = user_states[user_id]['gif_settings']
+    keyboard = InlineKeyboardMarkup(row_width=1)
+    
+    fps_btn = InlineKeyboardButton(lang["setting_fps"].format(value=settings['fps']), callback_data="open_settings_fps")
+    width_btn = InlineKeyboardButton(lang["setting_width"].format(value=settings['width']), callback_data="open_settings_width")
+    colors_btn = InlineKeyboardButton(lang["setting_colors"].format(value=settings['colors']), callback_data="open_settings_colors")
+    back_btn = InlineKeyboardButton(lang["button_back"], callback_data="back_to_main")
+    
+    keyboard.add(fps_btn, width_btn, colors_btn, back_btn)
+    return keyboard
+
+def create_specific_setting_keyboard(setting_type, current_value, options):
+    keyboard = InlineKeyboardMarkup(row_width=4)
+    buttons = []
+    for option in options:
+        text = f"✅ {option}" if is_current(option, current_value) else str(option)
+        buttons.append(InlineKeyboardButton(text, callback_data=f"set_{setting_type}_{option}"))
+    
+    keyboard.add(*buttons)
+    keyboard.row(InlineKeyboardButton(lang["button_back_to_settings"], callback_data="open_settings_main"))
     return keyboard
 
 @bot.message_handler(commands=['start', 'help'])
@@ -200,7 +236,8 @@ def handle_message(message):
         
         user_states[user_id] = {
             'url': message.text, 'title': title, 'duration': duration_str,
-            'start_time': start_time, 'end_time': end_time, 'message_id': msg.message_id
+            'start_time': start_time, 'end_time': end_time, 'message_id': msg.message_id,
+            'gif_settings': DEFAULT_SETTINGS.copy()
         }
     except Exception as e:
         logging.error(f"Failed to get video info for URL {message.text} by user {user_id}. Error: {e}")
@@ -216,36 +253,62 @@ def handle_callback(call):
         return
     
     state = user_states[user_id]
+    data = call.data
     
-    if call.data.startswith("start_"):
+    if data == "open_settings_main":
+        keyboard = create_main_settings_keyboard(user_id)
+        bot.edit_message_caption(caption=lang["settings_title"], chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=keyboard)
+    
+    elif data == "open_settings_fps":
+        keyboard = create_specific_setting_keyboard('fps', state['gif_settings']['fps'], FPS_OPTIONS)
+        bot.edit_message_caption(caption=lang["settings_menu_title_fps"], chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=keyboard)
+    
+    elif data == "open_settings_width":
+        keyboard = create_specific_setting_keyboard('width', state['gif_settings']['width'], WIDTH_OPTIONS)
+        bot.edit_message_caption(caption=lang["settings_menu_title_width"], chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=keyboard)
+    
+    elif data == "open_settings_colors":
+        keyboard = create_specific_setting_keyboard('colors', state['gif_settings']['colors'], COLOR_OPTIONS)
+        bot.edit_message_caption(caption=lang["settings_menu_title_colors"], chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=keyboard)
+    
+    elif data.startswith("set_"):
+        _, setting_type, value = data.split('_')
+        state['gif_settings'][setting_type] = int(value)
+        keyboard = create_main_settings_keyboard(user_id)
+        bot.edit_message_caption(caption=lang["settings_title"], chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=keyboard)
+        bot.answer_callback_query(call.id, lang["setting_changed"])
+
+    elif data == "back_to_main":
+        caption = lang["video_caption"].format(title=state['title'], duration=state['duration'])
+        keyboard = create_time_keyboard(state['start_time'], state['end_time'])
+        bot.edit_message_caption(caption=caption, chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=keyboard, parse_mode='Markdown')
+    
+    elif data.startswith("start_"):
         state['waiting_for'] = 'start_time'
         prompt_msg = bot.send_message(call.message.chat.id, lang["prompt_start_time"])
         state['prompt_message_id'] = prompt_msg.message_id
         
-    elif call.data.startswith("end_"):
+    elif data.startswith("end_"):
         state['waiting_for'] = 'end_time'
         prompt_msg = bot.send_message(call.message.chat.id, lang["prompt_end_time"])
         state['prompt_message_id'] = prompt_msg.message_id
         
-    elif call.data.startswith("duration_"):
+    elif data.startswith("duration_"):
         state['waiting_for'] = 'duration'
         prompt_msg = bot.send_message(call.message.chat.id, lang["prompt_duration"].format(max_duration=config.MAX_GIF_DURATION))
         state['prompt_message_id'] = prompt_msg.message_id
 
-    elif call.data == "cancel":
+    elif data == "cancel":
         bot.delete_message(call.message.chat.id, call.message.message_id)
         del user_states[user_id]
-        
-    elif call.data == "done":
+    
+    elif data == "done":
         bot.answer_callback_query(call.id)
-        
         start_seconds = time_to_seconds(state['start_time'])
         end_seconds = time_to_seconds(state['end_time'])
-        
         if end_seconds <= start_seconds:
             bot.answer_callback_query(call.id, lang["alert_end_before_start"], show_alert=True)
             return
-        
         if (end_seconds - start_seconds) > config.MAX_GIF_DURATION:
             bot.answer_callback_query(call.id, lang["alert_duration_too_long"].format(max_duration=config.MAX_GIF_DURATION), show_alert=True)
             return
@@ -253,37 +316,59 @@ def handle_callback(call):
         try: bot.delete_message(call.message.chat.id, state['message_id'])
         except Exception: pass
         
-        logging.info(f"User {user_id} creating GIF for {state['url']} from {state['start_time']} to {state['end_time']}")
         process_msg = bot.send_message(call.message.chat.id, lang["creating_gif"].format(start_time=state['start_time'], end_time=state['end_time']))
         
-        tmp_file = None
+        mp4_file, gif_file = None, None
         try:
-            tmp_file = tempfile.NamedTemporaryFile(suffix='.gif', delete=False)
-            tmp_filename = tmp_file.name
-            tmp_file.close()
-
+            mp4_file = tempfile.NamedTemporaryFile(suffix='.mp4', delete=False)
             result = client.get_video(
-                url=state['url'], output_format='gif',
+                url=state['url'], output_format='mp4',
                 start_time=state['start_time'], end_time=state['end_time'],
-                force_keyframes=True
-            )
-            result.save_file(tmp_filename)
+                force_keyframes=True)
+            result.save_file(mp4_file.name)
+            mp4_file.close()
+
+            gif_file = tempfile.NamedTemporaryFile(suffix='.gif', delete=False)
+            gif_file.close()
             
-            with open(tmp_filename, 'rb') as gif_file:
-                bot.send_animation(call.message.chat.id, gif_file, caption=lang["gif_ready"].format(title=state['title']))
+            settings = state['gif_settings']
+            gif_fps = settings['fps']
+            gif_width = settings['width']
+            gif_colors = settings['colors']
+            logging.info(f"User {user_id}: Using settings FPS:{gif_fps}, Width:{gif_width}, Colors:{gif_colors}")
+            
+            ffmpeg_filter = (
+                f'fps={gif_fps},scale={gif_width}:-1:flags=lanczos,'
+                f'split[s0][s1];[s0]palettegen=max_colors={gif_colors}[p];[s1][p]paletteuse'
+            )
+            
+            subprocess.run([
+                'ffmpeg', '-i', mp4_file.name, '-vf', ffmpeg_filter,
+                '-y', gif_file.name
+            ], check=True, capture_output=True, text=True)
+            
+            with open(gif_file.name, 'rb') as f:
+                bot.send_animation(call.message.chat.id, f, caption=lang["gif_ready"].format(title=state['title']))
             
             bot.delete_message(call.message.chat.id, process_msg.message_id)
             del user_states[user_id]
             
+        except subprocess.CalledProcessError as e:
+            logging.error(f"FFmpeg failed for user {user_id}. Error: {e.stderr}")
+            bot.delete_message(call.message.chat.id, process_msg.message_id)
+            bot.send_message(call.message.chat.id, lang["error_creating_gif"])
+            if user_id in user_states: del user_states[user_id]
         except Exception as e:
             logging.error(f"Failed to create GIF for user {user_id}. URL: {state['url']}. Error: {e}")
             bot.delete_message(call.message.chat.id, process_msg.message_id)
             bot.send_message(call.message.chat.id, lang["error_creating_gif"])
             if user_id in user_states: del user_states[user_id]
         finally:
-            if tmp_file and os.path.exists(tmp_file.name):
-                os.unlink(tmp_file.name)
-    bot.answer_callback_query(call.id)
+            if mp4_file and os.path.exists(mp4_file.name): os.unlink(mp4_file.name)
+            if gif_file and os.path.exists(gif_file.name): os.unlink(gif_file.name)
+    
+    if not data.startswith(('start_', 'end_', 'duration_', 'set_')) and data != 'done':
+        bot.answer_callback_query(call.id)
 
 if __name__ == '__main__':
     logging.info("Bot is starting...")
